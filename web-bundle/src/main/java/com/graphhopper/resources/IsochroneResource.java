@@ -80,7 +80,8 @@ public class IsochroneResource {
             @QueryParam("distance_limit") @DefaultValue("-1") LongParam distanceLimitInMeter,
             @QueryParam("weight_limit") @DefaultValue("-1") LongParam weightLimit,
             @QueryParam("type") @DefaultValue("json") ResponseType respType,
-            @QueryParam("full_geometry") @DefaultValue("false") boolean fullGeometry) {
+            @QueryParam("full_geometry") @DefaultValue("false") boolean fullGeometry,
+            @QueryParam("tolerance") @DefaultValue("0") double tolerance) {
         StopWatch sw = new StopWatch().start();
 
         PMap hintsMap = new PMap();
@@ -140,7 +141,7 @@ public class IsochroneResource {
             fz = l -> l.time;
         }
 
-        Triangulator.Result result = triangulator.triangulate(snap, queryGraph, shortestPathTree, fz);
+        Triangulator.Result result = triangulator.triangulate(snap, queryGraph, shortestPathTree, fz, tolerance);
 
         ContourBuilder contourBuilder = new ContourBuilder(result.triangulation);
         ArrayList<Geometry> isochrones = new ArrayList<>();
