@@ -21,6 +21,7 @@ import static com.graphhopper.util.Parameters.Details.INTERSECTION;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -158,6 +159,54 @@ public class NavigateResponseConverter {
         legJson.put("distance", Helper.round(distance, 1));
     }
 
+
+    /**
+     * fix the first IntersectionDetail.
+     *
+     * The first Intersection of the first step should only have 1 bearing and one "out" entry
+     *
+     */
+    private static List<PathDetail> fixFirstIntersectionDetail( List<PathDetail> intersectionDetails) {
+        List<PathDetail> list = new ArrayList<>();
+
+        // job1: find out the interesting part of the intersectionDetails
+        if (intersectionDetails.size() < 2) {
+            // LOG Error? User didnt ask for intersections ?
+            return intersectionDetails;
+        }
+
+        Map<String, Object> newFirstIntersection = new HashMap<>();
+
+        final Map<String, Object> firstItersectionMap = (Map<String, Object>) intersectionDetails.get(0).getValue();
+
+        int out = (int) firstItersectionMap.get("out");
+        newFirstIntersection.put( "out", 0); // we will have only one entry
+
+        // bearings
+        List<Integer> firstBearingsList = (List<Integer>) firstItersectionMap.get("bearings");
+        List<Integer> firstBearings = new ArrayList<>();
+        firstBearings.add(firstBearingsList.get(out));
+        newFirstIntersection.put( "bearings", firstBearings);
+
+        // entries
+        final List<Boolean> firstEntriesList = (List<Boolean>) firstItersectionMap.get("entries");
+        List<Boolean> firstEntries = new ArrayList<>();
+        firstEntries.add( firstEntriesList.get(out));
+        newFirstIntersection.put( "entries", firstEntries);
+
+        // new first Pathdetail
+        PathDetail firstPathDetail =  new PathDetail( newFirstIntersection);
+        firstPathDetail.setFirst( intersectionDetails.get(0).getFirst());
+        firstPathDetail.setLast( intersectionDetails.get(0).getLast());
+        list.add( firstPathDetail);
+
+        // copy over all elements but the first and last
+        for (int i = 1; i < intersectionDetails.size() - 1; i++) {
+            list.add(intersectionDetails.get(i) );
+        }
+        return list;
+    }
+
     /**
      * filter the IntersectionDetails.
      *
@@ -260,6 +309,37 @@ public class NavigateResponseConverter {
         Instruction instruction = instructions.get(instructionIndex);
         ArrayNode intersections = instructionJson.putArray("intersections");
 
+        // make pointList writeable
+        PointList pointList = instruction.getPoints().clone(false);
+
+        if (instructionIndex == 0) {
+             // Fix first (departure) instruction
+             // to only have one "out" intersection
+            intersectionDetails = fixFirstIntersectionDetail(intersectionDetails);
+        }  else if (instructionIndex < instructions.size() - 1) {
+            // modify pointlist to include the first point of the next instruction
+            // for all instructions but the arrival
+            PointList nextPoints = instructions.get(instructionIndex + 1).getPoints();
+            pointList.add(nextPoints.getLat(0), nextPoints.getLon(0), nextPoints.getEle(0));
+        } else {
+            // we are at the arrival (or via point arrival instruction)
+            // Duplicate the last point in the arrival instruction, which does has only one point
+            pointList.add(pointList.getLat(0), pointList.getLon(0), pointList.getEle(0));
+
+            // Add an arrival intersection with only one enty
+            ObjectNode intersection = intersections.addObject();
+            ArrayNode entryArray = intersection.putArray("entry");
+            entryArray.add(true);
+
+            // copy the bearing from the previous instruction
+            ArrayNode bearingsrray = intersection.putArray("bearings");
+            bearingsrray.add( 0);
+
+            // add the in tag
+            intersection.put("in", 0);
+            putLocation(pointList.getLat(0), pointList.getLon(0), intersection);
+        }
+
         // preprocess intersectionDetails
         List<PathDetail> filteredIntersectionDetails = filterIntersectionDetails(points, intersectionDetails,
                 pointIndexFrom, pointIndexTo);
@@ -292,28 +372,6 @@ public class NavigateResponseConverter {
             if (intersectionValue.containsKey("out")) {
                 intersection.put("out", (int) intersectionValue.get("out"));
             }
-        }
-
-        // Make pointList mutable
-        PointList pointList = instruction.getPoints().clone(false);
-
-        if (instructionIndex + 1 < instructions.size()) {
-            // Add the first point of the next instruction
-            PointList nextPoints = instructions.get(instructionIndex + 1).getPoints();
-            pointList.add(nextPoints.getLat(0), nextPoints.getLon(0), nextPoints.getEle(0));
-        } else if (pointList.size() == 1) {
-            // Duplicate the last point in the arrive instruction, if the size is 1
-            pointList.add(pointList.getLat(0), pointList.getLon(0), pointList.getEle(0));
-        }
-
-        if (intersections.size() == 0) {
-            // this is the fallback if we don't have any intersections.
-            // this can happen for via points or finish instructions or when no intersection
-            // details have been requested
-            ObjectNode intersection = intersections.addObject();
-            intersection.putArray("entry");
-            intersection.putArray("bearings");
-            putLocation(pointList.getLat(0), pointList.getLon(0), intersection);
         }
 
         instructionJson.put("driving_side", "right");
