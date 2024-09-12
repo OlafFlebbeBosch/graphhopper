@@ -316,7 +316,8 @@ public class NavigateResponseConverter {
              // Fix first (departure) instruction
              // to only have one "out" intersection
             intersectionDetails = fixFirstIntersectionDetail(intersectionDetails);
-        }  else if (instructionIndex < instructions.size() - 1) {
+        }
+        if (instructionIndex < instructions.size() - 1) {
             // modify pointlist to include the first point of the next instruction
             // for all instructions but the arrival
             PointList nextPoints = instructions.get(instructionIndex + 1).getPoints();
