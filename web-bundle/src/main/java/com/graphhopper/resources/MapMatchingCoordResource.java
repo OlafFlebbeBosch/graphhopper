@@ -26,10 +26,8 @@ import com.graphhopper.GHResponse;
 import com.graphhopper.GraphHopper;
 import com.graphhopper.GraphHopperConfig;
 import com.graphhopper.ResponsePath;
-import com.graphhopper.gpx.GpxConversions;
 import com.graphhopper.util.shapes.GHPoint;
 import com.graphhopper.http.ProfileResolver;
-import com.graphhopper.jackson.Gpx;
 import com.graphhopper.jackson.Jackson;
 import com.graphhopper.jackson.ResponsePathSerializer;
 import com.graphhopper.matching.*;
@@ -39,13 +37,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import jakarta.inject.Inject;
-import jakarta.validation.constraints.NotNull;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import java.util.*;
+import java.util.stream.*;
+import com.graphhopper.resources.MapMatchingResource.MapMatchingRouterFactory;
 
 import static com.graphhopper.resources.RouteResource.removeLegacyParameters;
 import static com.graphhopper.util.Parameters.Details.PATH_DETAILS;
@@ -56,12 +55,8 @@ import static com.graphhopper.util.Parameters.Routing.*;
  *
  * @author Peter Karich
  */
-@jakarta.ws.rs.Path("match")
-public class MapMatchingResource {
-
-    public interface MapMatchingRouterFactory {
-        public MapMatching.Router createMapMatchingRouter(PMap hints);
-    }
+@Path("coord")
+public class MapMatchingCoordResource {
 
     private static final Logger logger = LoggerFactory.getLogger(MapMatchingResource.class);
 
@@ -74,7 +69,8 @@ public class MapMatchingResource {
     private final String osmDate;
 
     @Inject
-    public MapMatchingResource(GraphHopperConfig config, GraphHopper graphHopper, ProfileResolver profileResolver, TranslationMap trMap, MapMatchingRouterFactory mapMatchingRouterFactory) {
+    public MapMatchingCoordResource(GraphHopperConfig config, GraphHopper graphHopper, ProfileResolver profileResolver,
+            TranslationMap trMap, MapMatchingRouterFactory mapMatchingRouterFactory) {
         this.config = config;
         this.graphHopper = graphHopper;
         this.profileResolver = profileResolver;
@@ -84,10 +80,10 @@ public class MapMatchingResource {
     }
 
     @POST
-    @Consumes({MediaType.APPLICATION_XML, "application/gpx+xml"})
-    @Produces({MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML, "application/gpx+xml"})
+    @Consumes({ MediaType.APPLICATION_FORM_URLENCODED })
+    @Produces({ MediaType.APPLICATION_JSON })
     public Response match(
-            @NotNull Gpx gpx,
+            @FormParam("coord") String coord,
             @Context UriInfo uriInfo,
             @QueryParam(WAY_POINT_MAX_DISTANCE) @DefaultValue("0.5") double minPathPrecision,
             @QueryParam("type") @DefaultValue("json") String outType,
@@ -103,15 +99,6 @@ public class MapMatchingResource {
             @QueryParam("gpx.track") @DefaultValue("true") boolean withTrack,
             @QueryParam("traversal_keys") @DefaultValue("false") boolean enableTraversalKeys,
             @QueryParam("gps_accuracy") @DefaultValue("10") double gpsAccuracy) {
-        boolean writeGPX = "gpx".equalsIgnoreCase(outType);
-        if (gpx.trk.isEmpty()) {
-            throw new IllegalArgumentException("No tracks found in GPX document. Are you using waypoints or routes instead?");
-        }
-        if (gpx.trk.size() > 1) {
-            throw new IllegalArgumentException("GPX documents with multiple tracks not supported yet.");
-        }
-
-        instructions = writeGPX || instructions;
 
         StopWatch sw = new StopWatch().start();
 
@@ -127,10 +114,12 @@ public class MapMatchingResource {
         hints.putObject("profile", profile);
         removeLegacyParameters(hints);
 
-        MapMatching matching = new MapMatching(graphHopper.getBaseGraph(), (LocationIndexTree) graphHopper.getLocationIndex(), mapMatchingRouterFactory.createMapMatchingRouter(hints));
+        MapMatching matching = new MapMatching(graphHopper.getBaseGraph(),
+                (LocationIndexTree) graphHopper.getLocationIndex(),
+                mapMatchingRouterFactory.createMapMatchingRouter(hints));
         matching.setMeasurementErrorSigma(gpsAccuracy);
 
-        List<Observation> measurements = GpxConversions.getEntries(gpx.trk.get(0));
+        List<Observation> measurements = coord2observation(coord);
         MatchResult matchResult = matching.match(measurements);
 
         sw.stop();
@@ -141,60 +130,65 @@ public class MapMatchingResource {
                 .putPOJO("mapmatching", matching.getStatistics()).toString());
 
         if ("extended_json".equals(outType)) {
-            return Response.ok(convertToTree(matchResult, enableElevation, pointsEncoded, pointsEncodedMultiplier)).
-                    header("X-GH-Took", "" + Math.round(sw.getMillisDouble())).
-                    build();
+            return Response.ok(convertToTree(matchResult, enableElevation, pointsEncoded, pointsEncodedMultiplier))
+                    .header("X-GH-Took", "" + Math.round(sw.getMillisDouble())).build();
         } else {
             Translation tr = trMap.getWithFallBack(Helper.getLocale(localeStr));
             RamerDouglasPeucker simplifyAlgo = new RamerDouglasPeucker().setMaxDistance(minPathPrecision);
-            PathMerger pathMerger = new PathMerger(matchResult.getGraph(), matchResult.getWeighting()).
-                    setEnableInstructions(instructions).
-                    setPathDetailsBuilders(graphHopper.getPathDetailsBuilderFactory(), pathDetails).
-                    setRamerDouglasPeucker(simplifyAlgo).
-                    setSimplifyResponse(minPathPrecision > 0);
-            ResponsePath responsePath = pathMerger.doWork(PointList.EMPTY, Collections.singletonList(matchResult.getMergedPath()),
+            PathMerger pathMerger = new PathMerger(matchResult.getGraph(), matchResult.getWeighting())
+                    .setEnableInstructions(instructions)
+                    .setPathDetailsBuilders(graphHopper.getPathDetailsBuilderFactory(), pathDetails)
+                    .setRamerDouglasPeucker(simplifyAlgo).setSimplifyResponse(minPathPrecision > 0);
+            ResponsePath responsePath = pathMerger.doWork(PointList.EMPTY,
+                    Collections.singletonList(matchResult.getMergedPath()),
                     graphHopper.getEncodingManager(), tr);
 
-            // GraphHopper thinks an empty path is an invalid path, and further that an invalid path is still a path but
+            // GraphHopper thinks an empty path is an invalid path, and further that an
+            // invalid path is still a path but
             // marked with a non-empty list of Exception objects. I disagree, so I clear it.
             responsePath.getErrors().clear();
             GHResponse rsp = new GHResponse();
             rsp.add(responsePath);
 
-            if (writeGPX) {
-                long time = gpx.trk.get(0).getStartTime()
-                        .map(Date::getTime)
-                        .orElse(System.currentTimeMillis());
-                return Response.ok(GpxConversions.createGPX(rsp.getBest().getInstructions(), gpx.trk.get(0).name != null ? gpx.trk.get(0).name : "", time, enableElevation, withRoute, withTrack, false, Constants.VERSION, tr), "application/gpx+xml").
-                        header("X-GH-Took", "" + Math.round(sw.getMillisDouble())).
-                        build();
-            } else {
-                ObjectNode map = ResponsePathSerializer.jsonObject(rsp, new ResponsePathSerializer.Info(config.getCopyrights(), Math.round(sw.getMillisDouble()), osmDate), instructions,
-                        calcPoints, enableElevation, pointsEncoded, pointsEncodedMultiplier);
+            ObjectNode map = ResponsePathSerializer.jsonObject(rsp,
+                    new ResponsePathSerializer.Info(config.getCopyrights(), Math.round(sw.getMillisDouble()), osmDate),
+                    instructions,
+                    calcPoints, enableElevation, pointsEncoded, pointsEncodedMultiplier);
 
-                Map<String, Object> matchStatistics = new HashMap<>();
-                matchStatistics.put("distance", matchResult.getMatchLength());
-                matchStatistics.put("time", matchResult.getMatchMillis());
-                matchStatistics.put("original_distance", matchResult.getGpxEntriesLength());
-                map.putPOJO("map_matching", matchStatistics);
+            Map<String, Object> matchStatistics = new HashMap<>();
+            matchStatistics.put("distance", matchResult.getMatchLength());
+            matchStatistics.put("time", matchResult.getMatchMillis());
+            matchStatistics.put("original_distance", matchResult.getGpxEntriesLength());
+            map.putPOJO("map_matching", matchStatistics);
 
-                if (enableTraversalKeys) {
-                    List<Integer> traversalKeylist = new ArrayList<>();
-                    for (EdgeMatch em : matchResult.getEdgeMatches()) {
-                        EdgeIteratorState edge = em.getEdgeState();
-                        // encode edges as traversal keys which includes orientation, decode simply by multiplying with 0.5
-                        traversalKeylist.add(edge.getEdgeKey());
-                    }
-                    map.putPOJO("traversal_keys", traversalKeylist);
+            if (enableTraversalKeys) {
+                List<Integer> traversalKeylist = new ArrayList<>();
+                for (EdgeMatch em : matchResult.getEdgeMatches()) {
+                    EdgeIteratorState edge = em.getEdgeState();
+                    // encode edges as traversal keys which includes orientation, decode simply by
+                    // multiplying with 0.5
+                    traversalKeylist.add(edge.getEdgeKey());
                 }
-                return Response.ok(map).
-                        header("X-GH-Took", "" + Math.round(sw.getMillisDouble())).
-                        build();
+                map.putPOJO("traversal_keys", traversalKeylist);
             }
+            return Response.ok(map).header("X-GH-Took", "" + Math.round(sw.getMillisDouble())).build();
+
         }
     }
 
-    public static JsonNode convertToTree(MatchResult result, boolean elevation, boolean pointsEncoded, double pointsEncodedMultiplier) {
+    List<Observation> coord2observation(String input) {
+
+        return Arrays.stream(input.split(";"))
+                .map(pair -> pair.split(","))
+                .map(coords -> new Observation(
+                        new GHPoint(
+                                Double.parseDouble(coords[0]),
+                                Double.parseDouble(coords[1]))))
+                .collect(Collectors.toList());
+    }
+
+    public static JsonNode convertToTree(MatchResult result, boolean elevation, boolean pointsEncoded,
+            double pointsEncodedMultiplier) {
         ObjectNode root = JsonNodeFactory.instance.objectNode();
         ObjectNode diary = root.putObject("diary");
         ArrayNode entries = diary.putArray("entries");
@@ -203,13 +197,20 @@ public class MapMatchingResource {
         for (int emIndex = 0; emIndex < result.getEdgeMatches().size(); emIndex++) {
             ObjectNode link = links.addObject();
             EdgeMatch edgeMatch = result.getEdgeMatches().get(emIndex);
-            PointList pointList = edgeMatch.getEdgeState().fetchWayGeometry(emIndex == 0 ? FetchMode.ALL : FetchMode.PILLAR_AND_ADJ);
+            PointList pointList = edgeMatch.getEdgeState()
+                    .fetchWayGeometry(emIndex == 0 ? FetchMode.ALL : FetchMode.PILLAR_AND_ADJ);
             final ObjectNode geometry = link.putObject("geometry");
             if (pointList.size() < 2) {
-                geometry.putPOJO("coordinates", pointsEncoded ? ResponsePathSerializer.encodePolyline(pointList, elevation, pointsEncodedMultiplier) : pointList.toLineString(elevation));
+                geometry.putPOJO("coordinates",
+                        pointsEncoded
+                                ? ResponsePathSerializer.encodePolyline(pointList, elevation, pointsEncodedMultiplier)
+                                : pointList.toLineString(elevation));
                 geometry.put("type", "Point");
             } else {
-                geometry.putPOJO("coordinates", pointsEncoded ? ResponsePathSerializer.encodePolyline(pointList, elevation, pointsEncodedMultiplier) : pointList.toLineString(elevation));
+                geometry.putPOJO("coordinates",
+                        pointsEncoded
+                                ? ResponsePathSerializer.encodePolyline(pointList, elevation, pointsEncodedMultiplier)
+                                : pointList.toLineString(elevation));
                 geometry.put("type", "LineString");
             }
             link.put("id", edgeMatch.getEdgeState().getEdge());
